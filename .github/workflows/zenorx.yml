@@ -1,0 +1,115 @@
+name: zenorX - Build APK Release dari ZIP
+
+# Simpan file ini sebagai: .github/workflows/zenorx.yml
+#
+# Cara pakai (update cukup 1 langkah):
+#   Unggah zenorX.zip terbaru ke root repo (timpa yang lama) -> Commit.
+#   ZIP TETAP tersimpan di repo. Bot hanya membuka ZIP di server sementara
+#   untuk build, tidak mengubah/men-commit apa pun ke repo.
+#   Hasil: Actions -> artifact "zenorX-release-apk", dan juga di Releases -> "latest".
+#
+# Bisa juga dijalankan manual: Actions -> pilih workflow ini -> Run workflow.
+
+on:
+  push:
+    paths:
+      - '*.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zenorx-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Buka ZIP (hanya di server, tidak di-commit)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "::error::Tidak ada file .zip di root repo. Unggah zenorX.zip dulu."
+            exit 1
+          fi
+          z="${zips[0]}"
+          for c in "${zips[@]}"; do
+            case "${c,,}" in
+              zenorx*.zip) z="$c" ;;
+            esac
+          done
+          echo "Memakai ZIP: $z"
+          rm -rf _build _src
+          mkdir _build
+          unzip -q -o "$z" -d _build
+          rm -rf _build/__MACOSX
+          # jika isi ZIP hanya satu folder, pakai isinya
+          count=$(find _build -mindepth 1 -maxdepth 1 | wc -l)
+          if [ "$count" -eq 1 ] && [ -d "$(find _build -mindepth 1 -maxdepth 1)" ]; then
+            inner="$(find _build -mindepth 1 -maxdepth 1)"
+            mv "$inner" _src
+            rm -rf _build
+            mv _src _build
+          fi
+          if [ ! -f _build/settings.gradle.kts ]; then
+            echo "::error::settings.gradle.kts tidak ditemukan di dalam ZIP."
+            exit 1
+          fi
+          ls _build
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          build-root-directory: _build
+
+      - name: Build APK release
+        shell: bash
+        working-directory: _build
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Ringkasan error (jika build gagal)
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f build.log ]; then
+            {
+              echo '## Error build zenorX'
+              echo '```'
+              grep -E '^e: |error:|What went wrong|Execution failed|Unresolved|clash|R8|Missing class' -A2 build.log | head -60
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Unggah APK (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenorX-release-apk
+          path: _build/app/build/outputs/apk/release/*.apk
+
+      - name: Publikasikan ke Releases (opsional)
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk=$(ls _build/app/build/outputs/apk/release/*.apk | head -n1)
+          cp "$apk" zenorX.apk
+          gh release delete latest --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create latest zenorX.apk --title "zenorX (build terbaru)" --notes "Dibuat otomatis dari ZIP, commit ${{ github.sha }}"
+          
